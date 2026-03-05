@@ -31,7 +31,7 @@ class MUSSSchedule:
         self.init_map = init_map
 
         # Setup scheduler
-        self.machine.add_comm_capacity(2)
+        #self.machine.add_comm_capacity(2)
         self.SerialTrapOps = serial_trap_ops
         self.SerialCommunication = serial_comm
         self.GlobalSerialLock = global_serial_lock
@@ -82,8 +82,8 @@ class MUSSSchedule:
         self.gates = self.static_topo_list
 
         # === v4 Fixed: 内部实时热量追踪参数 ===
-        self.nbar_penalty_lambda = 0.05   # Gate选择阶段：温和避热
-        self.rebalance_heat_beta = 4.5    # Rebalance阶段：强力驱逐热离子
+        self.nbar_penalty_lambda = 0.037292  # Gate选择阶段：温和避热
+        self.rebalance_heat_beta = 4.6645    # Rebalance阶段：强力驱逐热离子
         
         # 内部热量状态 (Ion ID -> n_bar)
         self.ion_heating = collections.defaultdict(float)

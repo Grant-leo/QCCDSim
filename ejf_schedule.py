@@ -31,8 +31,9 @@ class EJFSchedule:
         self.init_map = init_map
 
         # Setup scheduler
-        self.machine.add_comm_capacity(2)
+        #self.machine.add_comm_capacity(2)
         # Add space for 2 extra ions in each trap
+
         self.SerialTrapOps = serial_trap_ops  # ---> serializes operations on a single trap zone
         self.SerialCommunication = serial_comm  # ---> serializes all split/merge/move ops
         self.GlobalSerialLock = global_serial_lock  # ---> serialize gates and comm

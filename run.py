@@ -45,6 +45,10 @@ mpar.ion_swap_time          = 40
 mpar.junction2_cross_time   = 5
 mpar.junction3_cross_time   = 5
 mpar.junction4_cross_time   = 5
+mpar.move_speed_um_per_us = 2.0       # Table1: Move speed 2 μm/us
+mpar.segment_length_um = 53.0        # 
+mpar.inter_ion_spacing_um = 1.0       # 离子间隙（用于 gate_time 的距离计算）
+
 
 # 保真度相关（analyzer 会使用）
 mpar.T1         = 600e6         # us
@@ -125,7 +129,7 @@ elif mapper_choice == "SABRE":
     if sched_family in ["MUSS", "MUSS-TI", "MUSS_TI_MODE"]:
         if sched_version in ["V2", "2", "MUSS_SCHEDULE2", "PAPER"]:
             print("→ Using SABRE3 mapper (matches muss_schedule2 paper version)")
-            qm = QubitMapSABRE3(ip, m)
+            qm = QubitMapSABRE6(ip, m)
         elif sched_version in ["V3", "3", "MUSS_SCHEDULE3", "INNOV"]:
             print("→ Using SABRE6 mapper (matches muss_schedule3 improved version)")
             qm = QubitMapSABRE6(ip, m)
@@ -204,6 +208,9 @@ scheduler.run()
 # ────────────────────────────────────────────────
 analyzer = Analyzer(scheduler, m, init_qubit_layout)
 analyzer.move_check()
+# 调度完成后
+print("\n========== SHUTTLE TRACE ==========")
+print(scheduler.dump_shuttle_trace())
 
 if hasattr(scheduler, "split_swap_counter"):
     print("SplitSWAP:", scheduler.split_swap_counter)

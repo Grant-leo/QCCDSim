@@ -89,7 +89,7 @@ def evaluate_schedule(params):
 
 if __name__ == "__main__":
     lb = [0.001, 0.5]
-    ub = [0.05,  5.0]
+    ub = [0.05,  10]
 
     print(f"Starting Single Test...")
     test_res = evaluate_schedule([0.005, 1.0])
