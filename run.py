@@ -94,7 +94,7 @@ mpar.junction4_cross_time = 5
 mpar.move_speed_um_per_us = 2.0       # Table 1: Move speed 2 μm/us
 
 # ---- 这些是实现/拟合相关参数 ----
-mpar.segment_length_um = 53.0         # 默认段长；后续可按机器类型再调
+mpar.segment_length_um = 45.0         # 默认段长；后续可按机器类型再调
 mpar.inter_ion_spacing_um = 1.0       # gate_time 距离项使用
 mpar.alpha_bg = 0.0                   # 论文对准时通常先关掉背景 Bi
 
@@ -182,10 +182,10 @@ elif mapper_choice == "SABRE":
     if sched_family in ["MUSS", "MUSS-TI", "MUSS_TI_MODE"]:
         if sched_version in ["V2", "2", "MUSS_SCHEDULE2", "PAPER"]:
             print("→ Using SABRE2 mapper (matches muss_schedule2 paper version)")
-            qm = QubitMapSABRE3(ip, m)
+            qm = QubitMapSABRE2(ip, m)
         elif sched_version in ["V3", "3", "MUSS_SCHEDULE3", "INNOV"]:
             print("→ Using SABRE6 mapper (matches muss_schedule3 improved version)")
-            qm = QubitMapSABRE6(ip, m)
+            qm = QubitMapSABRE3(ip, m)
         elif sched_version in ["V4", "4", "MUSS_SCHEDULE4", "INNOV2"]:
             print("→ Using SABRE6 mapper (matches muss_schedule4 improved version)")
             qm = QubitMapSABRE6(ip, m)
@@ -194,7 +194,7 @@ elif mapper_choice == "SABRE":
             qm = QubitMapSABRE3(ip, m)
     else:
         print("→ Using default SABRE3 mapper (non-MUSS scheduler)")
-        qm = QubitMapSABRE3(ip, m)
+        qm = QubitMapSABRE2(ip, m)
 else:
     print(f"Error: Unsupported mapper choice '{mapper_choice}'")
     sys.exit(1)
