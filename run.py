@@ -83,6 +83,7 @@ swap_type = sys.argv[10]             # PaperSwapDirect / GateSwap / IonSwap
 # 新增：调度器家族和版本（可缺省）
 sched_family = get_arg(11, "MUSS").upper()
 sched_version = get_arg(12, "V2").upper()   # 不锁死 V2，保留你原来的默认习惯
+analyzer_mode = get_arg(13, "PAPER").upper()
 
 
 # ============================================================
@@ -100,7 +101,7 @@ mpar.junction4_cross_time = 5
 mpar.move_speed_um_per_us = 2.0       # Table 1: Move speed 2 μm/us
 
 # ---- 这些是实现/拟合相关参数 ----
-mpar.segment_length_um = 45.0         # 默认段长；后续可按机器类型再调
+mpar.segment_length_um = 28.0         # 默认段长；后续可按机器类型再调
 mpar.inter_ion_spacing_um = 1.0       # gate_time 距离项使用
 mpar.alpha_bg = 0.0                   # 论文对准时通常先关掉背景 Bi
 mpar.enable_partition = True          # 小规模 faithful 复现建议开启 zone 标签
@@ -134,6 +135,7 @@ print("GateType:         ", gate_type)
 print("SwapType:         ", swap_type)
 print("Scheduler Family: ", sched_family)
 print("Scheduler Version:", sched_version)
+print("Analyzer Mode:    ", analyzer_mode)
 
 
 # ============================================================
@@ -198,7 +200,7 @@ elif mapper_choice == "SABRE":
             qm = QubitMapSABRE6(ip, m)
         else:
             print(f"Warning: Unknown scheduler version '{sched_version}', fallback to SABRE3")
-            qm = QubitMapSABRE3(ip, m)
+            qm = QubitMapSABRE2(ip, m)
     else:
         print("→ Using default SABRE3 mapper (non-MUSS scheduler)")
         qm = QubitMapSABRE2(ip, m)
@@ -267,33 +269,24 @@ scheduler.run()
 
 # ============================================================
 # Analyzer 配置
-# 核心兼容逻辑：
-#   - 若 schedule 事件里带 shuttle_id，则用 aggregate（新 analyzer 论文对准模式）
-#   - 否则自动回退 per_event（兼容还没补 shuttle_id 的 V3/V4/旧版本）
+#   PAPER: 更贴论文 Table 2 口径
+#   EXTENDED: 保留原扩展热背景模型
 # ============================================================
 use_aggregate = has_shuttle_id_annotations(scheduler)
 
 if use_aggregate:
-    print("Analyzer mode: aggregate shuttle fidelity (detected shuttle_id annotations)")
+    print("Analyzer shuttle mode: aggregate (detected shuttle_id annotations)")
 else:
-    print("Analyzer mode: per_event shuttle fidelity (no shuttle_id detected; compatibility fallback)")
+    print("Analyzer shuttle mode: per_event (no shuttle_id detected; compatibility fallback)")
 
-knobs = AnalyzerKnobs(
-    bg_model="exp",
-    alpha_bg=0.001,
-    inject_norm="none",
-    swap_norm="none",
-    move_heat_use_distance=True,
-    move_heat_const=0.1,
-    move_bg_fraction=0.175,
-    gate_env_time_mode="duration",
-    gate_use_env=False, 
-    gate_use_bg=True,
-    shuttle_fidelity_mode=("aggregate" if use_aggregate else "per_event"),
-    merge_equalize=True,
-    debug_events=False,
-    debug_summary=True,
-)
+shuttle_mode = ("aggregate" if use_aggregate else "per_event")
+if analyzer_mode in ["PAPER", "TABLE2", "P"]:
+    knobs = AnalyzerKnobs.paper_mode(shuttle_fidelity_mode=shuttle_mode, debug_summary=True)
+elif analyzer_mode in ["EXTENDED", "EXP", "E"]:
+    knobs = AnalyzerKnobs.extended_mode(shuttle_fidelity_mode=shuttle_mode, debug_summary=True)
+else:
+    print(f"Warning: unknown analyzer mode '{analyzer_mode}', fallback to PAPER")
+    knobs = AnalyzerKnobs.paper_mode(shuttle_fidelity_mode=shuttle_mode, debug_summary=True)
 
 
 analyzer = Analyzer(scheduler, m, init_qubit_layout, knobs)

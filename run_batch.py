@@ -1,69 +1,172 @@
-import subprocess as sp
 import os
+import subprocess as sp
+from pathlib import Path
 
-PATH = "./programs"
+# ============================================================
+# 批量运行脚本（适配当前 run.py 参数）
+# - 支持 MUSS V2/V3/V4 与 EJF
+# - 支持 PAPER / EXTENDED analyzer
+# - 默认配置为更贴近论文 Table 2 的路线：SABRE + MUSS V2 + PAPER
+# ============================================================
 
+PATH = Path("./programs")
+OUTPUT_DIR = Path("./output")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# ============================================================
 # 选择电路
-PROG = ["BV32", "GHZ32", "ADDER32", "QAOA32", "QFT32","SQRT30"]
-#PROG = ["BV32"]  # 只跑一个电路，便于调试和验证
+# ============================================================
+PROG = ["BV32", "GHZ32", "ADDER32", "QAOA32", "QFT32", "SQRT30"]
+#PROG = ["BV32"]
 
-# 选择架构与容量
-MACHINE = {"G2x2": "12", "G2x3": "8"}
+# ============================================================
+# 选择架构与容量（对应论文 Table 2）
+# ============================================================
+MACHINE = {
+    "G2x2": "12",
+    "G2x3": "8",
+}
 
+# ============================================================
 # 映射方式
-mapper = "SABRE"
-# "Greedy":  贪心算法。优先聚合高频交互对。通常效果很好且稳定。
-# "PO":      图分割优化 (Placement Optimization)。适合大电路最小化跨阱通信。（文献55推荐的映射方式）
-# "LPFS":    最长路径优先。优化关键路径延迟。
-# "Agg":     层次聚类。将紧密子图聚类到同一个阱。
-# "Random":  随机映射。用于验证算法有效性的下界。
-# "Trivial": MUSS-TI，不包括SABRE。
-# "SABRE":   SABRE映射。
+# 当前对标的是 SABRE2，因此这里固定走 SABRE，
+# 再由 run.py 依据 MUSS V2 自动选择 QubitMapSABRE2。
+# ============================================================
+MAPPER = "SABRE"
 
-# 重排序方式
-reorder = "Naive"
-# "Naive":    不优化顺序。直接按分配顺序排列。（MUSS论文似乎没有更多的要求）
-# "Fidelity": 优化阱内顺序。让交互多的离子在链上相邻，减少局部SWAP。（文献55推荐的映射方式）
+# ============================================================
+# 链内重排序
+# 对 faithful reproduction，建议先用 Naive；
+# 在进行文献55的复现的时候，可以改用 Fidelity做链排序，这会导致文献55的效果很好，与论文表2结果不符。
+# ============================================================
+REORDER = "Naive"
 
-# 调度器组合（可自由增删）
+# ============================================================
+# 调度器组合
+# Table 2 faithful reproduction 建议优先跑 ("MUSS", "V2")
+# 
+# ============================================================
 SCHEDULERS = [
-    #("MUSS", "V2"),   # 论文版本
-    ("MUSS", "V3"),   # 创新版本
-    #("MUSS", "V4"),   # 创新版本调度基础上的降低加热版本。
-    #("EJF",  ""),     # 文献[55]EJF，也可以扩展
+    ("MUSS", "V2"),   #论文复现版本
+    ("MUSS", "V3"),   #创新版本
+    # ("MUSS", "V4"), #有严重bug的创新版本
+    # ("EJF",  ""),   #文献55版本
 ]
 
-# [PATCH] 显式抽出 gate / swap 类型，便于统一切换与日志命名
-gate_type = "FM"
-swap_type = "PaperSwapDirect"
+# ============================================================
+# 物理门 / swap 模型
+# ============================================================
+GATE_TYPE = "FM"
+SWAP_TYPE = "PaperSwapDirect"
 
-# [PATCH] 保证输出目录存在
-os.makedirs("./output", exist_ok=True)
+# ============================================================
+# Analyzer 模式
+# PAPER: 更贴论文 Table 2 口径
+# EXTENDED: 增加了bi以及平均热链等操作的拟合版本
+# ============================================================
+ANALYZER_MODE = "PAPER"
 
-for prog in PROG:
-    for machine, ions in MACHINE.items():
-        for family, version in SCHEDULERS:
-            # 日志文件名带上版本信息，便于区分
-            log_name = f"./output/{prog}_{machine}_{ions}_{mapper}_{family}_{version}_{gate_type}_{swap_type}.log"
-            
-            args = [
-                "python", "run.py",
-                f"{PATH}/{prog}.qasm",
-                machine,
-                ions,
-                mapper,
-                reorder,
-                "1", "1", "1",          # serial_trap, serial_comm, serial_all
-                gate_type, swap_type
-            ]
-            
-            # 只在需要 MUSS 家族时才传版本
-            if family == "MUSS":
-                args.extend([family, version])
-            else:
-                args.append(family)     # EJF 等只需要 family
+# ============================================================
+# 资源串行化开关
+# 说明：run.py 的三个参数分别是
+#   serial_trap_ops, serial_comm, serial_all
+# 1均为串行，0为并行，根据论文理解，这里先都设置为串行，可以修改串并行组合来看对结果的影响
+# 若要进一步贴近论文，可单独再做一组灵敏度对比。
+# ============================================================
+SERIAL_TRAP_OPS = "1"
+SERIAL_COMM = "1"
+SERIAL_ALL = "1"
 
-            print(f"Running: {' '.join(args)} -> {log_name}")
-            
-            with open(log_name, "w", encoding="utf-8") as f:
-                sp.call(args, stdout=f, stderr=sp.STDOUT)
+
+# ============================================================
+# 可选：是否在日志名中加入 analyzer/reorder，方便区分
+# ============================================================
+def build_log_name(prog: str, machine: str, ions: str, family: str, version: str) -> Path:
+    parts = [
+        prog,
+        machine,
+        ions,
+        MAPPER,
+        REORDER,
+        family,
+        version if version else "BASE",
+        GATE_TYPE,
+        SWAP_TYPE,
+        ANALYZER_MODE,
+    ]
+    safe_name = "_".join(parts) + ".log"
+    return OUTPUT_DIR / safe_name
+
+
+# ============================================================
+# 组装命令
+# ============================================================
+def build_args(prog: str, machine: str, ions: str, family: str, version: str) -> list[str]:
+    qasm_path = PATH / f"{prog}.qasm"
+
+    args = [
+        "python",
+        "run.py",
+        str(qasm_path),
+        machine,
+        ions,
+        MAPPER,
+        REORDER,
+        SERIAL_TRAP_OPS,
+        SERIAL_COMM,
+        SERIAL_ALL,
+        GATE_TYPE,
+        SWAP_TYPE,
+    ]
+
+    if family.upper() == "MUSS":
+        args.extend([family, version if version else "V2", ANALYZER_MODE])
+    else:
+        # EJF 等非 MUSS 路径：run.py 仍接受 family，version 可省，
+        # analyzer_mode 放在第 13 个参数位，因此补一个空版本占位更稳妥。
+        args.extend([family, "", ANALYZER_MODE])
+
+    return args
+
+
+# ============================================================
+# 运行
+# ============================================================
+def main() -> None:
+    print("=" * 72)
+    print("Batch run configuration")
+    print(f"Programs       : {PROG}")
+    print(f"Machines       : {MACHINE}")
+    print(f"Mapper         : {MAPPER}")
+    print(f"Reorder        : {REORDER}")
+    print(f"Schedulers     : {SCHEDULERS}")
+    print(f"GateType       : {GATE_TYPE}")
+    print(f"SwapType       : {SWAP_TYPE}")
+    print(f"AnalyzerMode   : {ANALYZER_MODE}")
+    print(
+        f"Serial flags   : trap={SERIAL_TRAP_OPS}, comm={SERIAL_COMM}, all={SERIAL_ALL}"
+    )
+    print("=" * 72)
+
+    for prog in PROG:
+        for machine, ions in MACHINE.items():
+            for family, version in SCHEDULERS:
+                args = build_args(prog, machine, ions, family, version)
+                log_path = build_log_name(prog, machine, ions, family, version)
+
+                print(f"Running: {' '.join(args)}")
+                print(f"Log    : {log_path}")
+
+                with open(log_path, "w", encoding="utf-8") as f:
+                    ret = sp.call(args, stdout=f, stderr=sp.STDOUT)
+
+                if ret != 0:
+                    print(f"[WARN] Process exited with code {ret}: {log_path}")
+                else:
+                    print(f"[OK]   Finished: {log_path}")
+
+    print("All jobs finished.")
+
+
+if __name__ == "__main__":
+    main()

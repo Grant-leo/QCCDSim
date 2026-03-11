@@ -708,6 +708,17 @@ class MUSSSchedule:
         return {"qubits": list(data), "type": "cx" if len(data) == 2 else "u"}, list(data), "cx" if len(data) == 2 else "u"
 
     def _candidate_meeting_traps(self, trap_a, trap_b):
+        """
+        Table 2 stable mode:
+        对于当前 schedule_gate 的实现，一次 2Q 调度只支持“搬一颗离子到另一颗所在 trap”。
+        因此这里虽然保留 partition / zone 语义用于偏好排序，但候选执行位置只能是
+        两端已有 trap 之一，不能返回第三方 dedicated operation / optical trap。
+
+        这样做的原因：
+        1. 避免选中第三方 trap 后只搬一颗离子、另一颗仍不在场，进而在 gate_time() 崩溃；
+        2. 对齐当前 Table 2 复现主线，优先保证 time / fidelity / shuttle 统计口径稳定；
+        3. 为将来真正支持“双离子汇聚到 dedicated zone”保留 zone_type / qccd_id 元数据。
+        """
         if not getattr(self.machine.mparams, "enable_partition", False):
             return [trap_a, trap_b]
         try:
@@ -715,53 +726,50 @@ class MUSSSchedule:
             tb = self.machine.get_trap(trap_b)
         except Exception:
             return [trap_a, trap_b]
-        candidates = []
-        seen = set()
-        # same-QCCD case: prefer operation zone, then optical, then storage
-        qccds = []
-        if ta.qccd_id == tb.qccd_id:
-            qccds = [ta.qccd_id]
-        else:
-            qccds = [ta.qccd_id, tb.qccd_id]
+
         order = {"operation": 0, "optical": 1, "storage": 2}
-        for qid in qccds:
-            traps = sorted(self.machine.traps_in_qccd(qid), key=lambda tr: (order.get(getattr(tr, "zone_type", "storage"), 9), self.machine.trap_distance(tr.id, trap_a) + self.machine.trap_distance(tr.id, trap_b), tr.id))
-            for tr in traps:
-                if tr.id not in seen:
-                    candidates.append(tr.id)
-                    seen.add(tr.id)
-        for tid in [trap_a, trap_b]:
-            if tid not in seen:
-                candidates.append(tid)
-        return candidates
+        a_key = order.get(getattr(ta, "zone_type", "storage"), 9)
+        b_key = order.get(getattr(tb, "zone_type", "storage"), 9)
+
+        if a_key < b_key:
+            return [trap_a, trap_b]
+        if b_key < a_key:
+            return [trap_b, trap_a]
+
+        # 同级别时按总未来代价由 _choose_partition_target 再决定；这里先保持 FCFS 稳定顺序
+        return [trap_a, trap_b]
 
     def _choose_partition_target(self, ion1_trap, ion2_trap, ion1, ion2, current_gate_idx):
+        """
+        Table 2 stable mode：
+        只允许在 ion1_trap / ion2_trap 之一执行 2Q gate。
+        返回值仍保持 (moving_ion, target_trap) 形式，便于复用现有 schedule_gate 流程。
+        """
         candidates = self._candidate_meeting_traps(ion1_trap, ion2_trap)
         best = None
         best_score = None
+
         for target in candidates:
-            free_slots = self.machine.get_trap(target).capacity - len(self.sys_state.trap_ions[target])
-            if target not in (ion1_trap, ion2_trap) and free_slots < 2:
-                continue
             if target == ion1_trap:
                 moving = ion2
-                score = self.machine.trap_distance(ion2_trap, target) + self.get_future_score(ion1, current_gate_idx, target) + self.get_future_score(ion2, current_gate_idx, target)
+                move_cost = self.machine.trap_distance(ion2_trap, target)
             elif target == ion2_trap:
                 moving = ion1
-                score = self.machine.trap_distance(ion1_trap, target) + self.get_future_score(ion1, current_gate_idx, target) + self.get_future_score(ion2, current_gate_idx, target)
+                move_cost = self.machine.trap_distance(ion1_trap, target)
             else:
-                # pick the cheaper ion to move into dedicated operation/optical zone
-                cost1 = self.machine.trap_distance(ion1_trap, target)
-                cost2 = self.machine.trap_distance(ion2_trap, target)
-                if cost1 <= cost2:
-                    moving = ion1
-                    score = cost1 + self.get_future_score(ion1, current_gate_idx, target) + self.get_future_score(ion2, current_gate_idx, target)
-                else:
-                    moving = ion2
-                    score = cost2 + self.get_future_score(ion1, current_gate_idx, target) + self.get_future_score(ion2, current_gate_idx, target)
+                # 防御性保护：当前 stable mode 不允许第三方 meeting trap
+                continue
+
+            score = (
+                move_cost
+                + self.get_future_score(ion1, current_gate_idx, target)
+                + self.get_future_score(ion2, current_gate_idx, target)
+            )
+
             if best_score is None or score < best_score:
                 best = (moving, target)
                 best_score = score
+
         return best
 
     # ==========================================================
@@ -819,6 +827,16 @@ class MUSSSchedule:
                         source_trap, dest_trap = self.shuttling_direction(ion1_trap, ion2_trap, ion1, ion2, gate_idx)
                         moving_ion = ion1 if source_trap == ion1_trap else ion2
                     clk = self.fire_shuttle(source_trap, dest_trap, moving_ion, fire_time)
+
+                    # 防御性检查：当前 stable mode 下，执行 2Q 门前两颗离子必须已经在同一 trap 中。
+                    dest_ions = self.sys_state.trap_ions[dest_trap]
+                    if ion1 not in dest_ions or ion2 not in dest_ions:
+                        raise RuntimeError(
+                            f"2Q gate cannot execute on trap {dest_trap}: ions not co-located. "
+                            f"gate={gate}, ion1={ion1}, ion2={ion2}, trap_ions={dest_ions}, "
+                            f"source_trap={source_trap}, moving_ion={moving_ion}"
+                        )
+
                     gate_duration = self.machine.gate_time(self.sys_state, dest_trap, ion1, ion2)
                     zone_type = getattr(self.machine.get_trap(dest_trap), "zone_type", None) if hasattr(self.machine, "get_trap") else None
                     self.schedule.add_gate(clk, clk + gate_duration, [ion1, ion2], dest_trap, gate_type=gate_type, zone_type=zone_type, gate_id=gate)
