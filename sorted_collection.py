@@ -194,7 +194,7 @@ class SortedCollection(object):
     def find_all_lt(self, k):
         i = bisect_left(self._keys, k)
         if i:
-            return self._items[: i - 1]
+            return self._items[: i]
         raise ValueError("No item found with key below: %r" % (k,))
 
     def find_gt(self, k):

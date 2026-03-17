@@ -1,24 +1,13 @@
 # muss_schedule2.py
 # ============================================================
-# MUSS Scheduler (V2) —— 论文复现版（兼容修复版）
+# MUSS Scheduler (V2) —— 论文复现版（修复后）
 #
-# 设计目标：
-# 1) 核心调度逻辑严格保留（frontier + rebalance + LRU + shuttle 链）
-# 2) 增强可观测性（shuttle_trace / schedule_events）
-# 3) 兼容修复后的 analyzer.py：
-#    - [FIX-A1] 给 Split / Move / Merge 事件补充 shuttle_id，
-#               使 analyzer 的 aggregate shuttle fidelity 模式可用
-# 4) 兼容修复后的 machine.py：
-#    - [FIX-M1] 不再对链内 swap 语义做任何额外假设，完全信任 machine.split_time() 返回值
-# 5) 保留对时间对齐有帮助的两个修复：
-#    - [FIX-1] junction 的时间不应额外 +junction_cross_time（通常折进 move 的距离/速度）
-#    - [FIX-2] fire_shuttle 估时时不能把 junction.id 当 segment.id 传给 move_time
-# 6) [NEW FIX] 1Q gate 延后插入时，ready time 必须基于 full_ir（完整 DAG），
-#               不能复用 2Q-only DAG 的 gate_ready_time
-#
-# 注意：
-# - “论文中明确给定的参数”（split_merge_time=80, gate(FM)=40, move_speed=2um/us 等）不在本文件修改
-# - MOVE 的物理距离模型由 machine.move_time() 决定（你可用 segment_length_um 等 knob 对齐 1760us / 2320us）
+# 修复目标：
+# 1) 保留论文主干逻辑（frontier + rebalance + LRU + shuttle 链）
+# 2) 修复 target trap capacity 检查缺失导致的“错误少算 shuttle / time”问题
+# 3) 主调度路径改用 FreeTrapRoute（capacity-aware），避免 BasicRoute 直接穿过满 trap
+# 4) 保留 shuttle_id 标注，供 analyzer aggregate shuttle fidelity 使用
+# 5) 保留 1Q 延后插入逻辑，保证 timing/fidelity replay 正确
 # ============================================================
 
 import networkx as nx
@@ -89,7 +78,10 @@ class MUSSSchedule:
         self.is_large_mode = not self.is_small_mode
 
         self.schedule = Schedule(self.machine)
-        self.router = BasicRoute(self.machine)
+
+        # 修复：主路径使用 capacity-aware router；BasicRoute 仅保留作最后调试兜底
+        self.basic_router = BasicRoute(self.machine)
+        self.router = None  # 在 sys_state 初始化之后绑定为 FreeTrapRoute
         self.gate_finish_times = {}
 
         # Scheduling statistics
@@ -117,6 +109,9 @@ class MUSSSchedule:
         for i in self.machine.segments:
             seg_ions[i.id] = []
         self.sys_state = MachineState(0, trap_ions, seg_ions)
+
+        # 绑定 capacity-aware router
+        self.router = FreeTrapRoute(self.machine, self.sys_state)
 
         # 预计算 trap-to-trap 最短路（给 shuttling_direction / lookahead 使用）
         if not hasattr(self.machine, "dist_cache") or not self.machine.dist_cache:
@@ -199,7 +194,6 @@ class MUSSSchedule:
 
     def _annotate_last_event_with_shuttle_id(self):
         """
-        [FIX-A1]
         给刚刚写入 schedule 的最后一个事件补充 shuttle_id。
         这样 analyzer 在 aggregate 模式下才能把
         Split / Move / Merge 聚合成同一次 shuttle。
@@ -272,6 +266,25 @@ class MUSSSchedule:
         return this_ion_last_op_time, this_ion_trap
 
     # ==========================================================
+    # 容量 / 路由辅助
+    # ==========================================================
+    def _trap_has_free_slot(self, trap_id, incoming=1):
+        cur = len(self.sys_state.trap_ions[trap_id])
+        cap = self.machine.traps[trap_id].capacity
+        return (cur + incoming) <= cap
+
+    def _find_route_or_none(self, source_trap, dest_trap):
+        """
+        统一包装 FreeTrapRoute：
+          - 返回合法路径则给出 route
+          - 若被 block，则返回 None
+        """
+        status, route = self.router.find_route(source_trap, dest_trap)
+        if status == 0:
+            return route
+        return None
+
+    # ==========================================================
     # 基础操作：Split / Move / Merge / Gate
     # ==========================================================
     def add_split_op(self, clk, src_trap, dest_seg, ion):
@@ -314,7 +327,6 @@ class MUSSSchedule:
             split_swap_count, split_swap_hops, i1, i2, ion_swap_hops
         )
 
-        # [FIX-A1] 给该事件补上 shuttle_id
         self._annotate_last_event_with_shuttle_id()
 
         # 4) trace
@@ -356,7 +368,6 @@ class MUSSSchedule:
             0, 0, 0, 0, 0
         )
 
-        # [FIX-A1] 给该事件补上 shuttle_id
         self._annotate_last_event_with_shuttle_id()
 
         self._trace_add_step("MERGE", merge_start, merge_end, f"ion {ion}: Seg{src_seg.id} -> T{dest_trap.id}")
@@ -368,7 +379,8 @@ class MUSSSchedule:
         """
         segment->segment 的 move（通过某个 junction）。
         论文贴合修复：
-          [FIX-1] 不再额外叠加 junction_cross_time（junction 时间折进 move 的距离/速度模型里）
+          junction 的阻塞由 junction_traffic_crossing 处理；
+          不额外叠加 junction_cross_time，避免重复记时。
         """
         m = self.machine
         move_start = clk
@@ -381,15 +393,12 @@ class MUSSSchedule:
             last_comm_time = self.schedule.last_comm_event_time()
             move_start = max(move_start, last_comm_time)
 
-        # [FIX-1] 这里去掉 + m.junction_cross_time(junct)
         move_end = move_start + m.move_time(src_seg.id, dest_seg.id)
 
         # junction 交通冲突（同一 junction 同时过车），这是调度冲突约束，不是物理额外时间
         move_start, move_end = self.schedule.junction_traffic_crossing(src_seg, dest_seg, junct, move_start, move_end)
 
         self.schedule.add_move(move_start, move_end, [ion], src_seg.id, dest_seg.id)
-
-        # [FIX-A1] 给该事件补上 shuttle_id
         self._annotate_last_event_with_shuttle_id()
 
         self._trace_add_step(
@@ -466,9 +475,22 @@ class MUSSSchedule:
           - 当前搬运代价（trap-hop 距离）
           - 未来代价（lookahead）
           - capacity 约束
+        返回:
+          (source_trap, dest_trap)
+        若两个方向都非法，返回 (None, None)
         """
         m = self.machine
         ALPHA = 1
+
+        legal_meet_at_t1 = self._trap_has_free_slot(ion1_trap, incoming=1)
+        legal_meet_at_t2 = self._trap_has_free_slot(ion2_trap, incoming=1)
+
+        if not legal_meet_at_t1 and not legal_meet_at_t2:
+            return None, None
+        if legal_meet_at_t1 and not legal_meet_at_t2:
+            return ion2_trap, ion1_trap
+        if legal_meet_at_t2 and not legal_meet_at_t1:
+            return ion1_trap, ion2_trap
 
         if current_gate_idx is None:
             return ion1_trap, ion2_trap
@@ -485,17 +507,6 @@ class MUSSSchedule:
         future_score_2_at_t1 = self.get_future_score(ion2, current_gate_idx, ion1_trap)
         total_score_meet_at_t1 = cost_current_move2 + ALPHA * (future_score_1_at_t1 + future_score_2_at_t1)
 
-        # capacity 约束：谁那边满了就不能往那边搬
-        ss = self.sys_state
-        cap1 = m.traps[ion1_trap].capacity - len(ss.trap_ions[ion1_trap])
-        cap2 = m.traps[ion2_trap].capacity - len(ss.trap_ions[ion2_trap])
-
-        if cap1 <= 0 and cap2 > 0:
-            return ion1_trap, ion2_trap
-        if cap2 <= 0 and cap1 > 0:
-            return ion2_trap, ion1_trap
-
-        # 选择 total_score 更低的一侧
         if total_score_meet_at_t2 < total_score_meet_at_t1:
             return ion1_trap, ion2_trap
         else:
@@ -507,15 +518,19 @@ class MUSSSchedule:
     def fire_shuttle(self, src_trap, dest_trap, ion, gate_fire_time, route=[]):
         """
         执行一次跨区搬运（论文意义 shuttle）：
-          1) route 为空则 router.find_route
+          1) route 为空则使用 capacity-aware route
           2) 根据路径估计时间 -> identify_start_time
           3) 插入 split/move/merge
           4) sys_state 更新 trap 的离子顺序（保持原逻辑）
         """
         m = self.machine
 
-        # route: Trap/Junction 节点序列
-        rpath = route if len(route) else self.router.find_route(src_trap, dest_trap)
+        if len(route):
+            rpath = route
+        else:
+            rpath = self._find_route_or_none(src_trap, dest_trap)
+            if rpath is None:
+                raise RuntimeError(f"No legal route found for shuttle: T{src_trap} -> T{dest_trap}")
 
         # ============ shuttle 计数 + trace record ============
         shuttle_id = self.shuttle_counter
@@ -527,7 +542,6 @@ class MUSSSchedule:
         self._current_shuttle_src = src_trap
         self._current_shuttle_dst = dest_trap
 
-        # route 文本化
         route_txt = []
         for node in rpath:
             if isinstance(node, Trap):
@@ -537,7 +551,6 @@ class MUSSSchedule:
             else:
                 route_txt.append(str(node))
 
-        # 统一把 src/dst 存成 trap_id（避免存对象导致打印/对齐混乱）
         src_id = src_trap.id if isinstance(src_trap, Trap) else int(src_trap)
         dst_id = dest_trap.id if isinstance(dest_trap, Trap) else int(dest_trap)
 
@@ -561,20 +574,15 @@ class MUSSSchedule:
             seg = self.machine.graph[u][v]["seg"]
 
             if isinstance(u, Trap) and isinstance(v, Junction):
-                # Trap->Junction：Split
                 t_est += m.mparams.split_merge_time
             elif isinstance(u, Junction) and isinstance(v, Junction):
-                # Junction->Junction：Move（按 segment hop 估时）
                 t_est += m.move_time(seg.id, seg.id)
             elif isinstance(u, Junction) and isinstance(v, Trap):
-                # Junction->Trap：Merge
                 t_est += m.merge_time(v.id)
 
-        # identify_start_time：检查路径上相关 segment 的冲突，找最早可开始的 clk
         clk = self.schedule.identify_start_time(rpath, gate_fire_time, t_est)
         clk = self._add_shuttle_ops(rpath, ion, clk)
 
-        # shuttle 结束
         self._trace_print(f"[TRACE] === SHUTTLE {shuttle_id} END at t={clk} ===")
 
         self._current_shuttle_id = None
@@ -603,10 +611,8 @@ class MUSSSchedule:
 
             clk = self._add_partial_shuttle_ops(spath[idx0:idx1], ion, clk)
 
-            # sys_state: 从源 trap 删除 ion
             self.sys_state.trap_ions[spath[trap_pos[i]].id].remove(ion)
 
-            # sys_state: 插入到目标 trap，保持方向一致（原逻辑）
             last_junct = spath[trap_pos[i + 1] - 1]
             dest_trap = spath[trap_pos[i + 1]]
             last_seg = self.machine.graph[last_junct][dest_trap]["seg"]
@@ -630,17 +636,14 @@ class MUSSSchedule:
             v = spath[i + 1]
             seg_list.append(self.machine.graph[u][v]["seg"])
 
-        # split：Trap -> 第一段 segment
         clk = self.add_split_op(clk, spath[0], seg_list[0], ion)
 
-        # move：跨 junction 链（segment -> segment）
         for i in range(len(seg_list) - 1):
             u = seg_list[i]
             v = seg_list[i + 1]
-            junct = spath[1 + i]  # spath 的 junction 节点
+            junct = spath[1 + i]
             clk = self.add_move_op(clk, u, v, junct, ion)
 
-        # merge：最后一段 segment -> Trap
         clk = self.add_merge_op(clk, spath[-1], seg_list[-1], ion)
         return clk
 
@@ -678,7 +681,7 @@ class MUSSSchedule:
     def do_rebalance_traps(self, fire_time):
         """
         通过 RebalanceTraps 计算 flow，然后按 DFS tree 逐条搬运，
-        搬运离子选择使用 LRU（最久没用的先搬）。
+        搬运离子选择使用 LRU（最久未使用的先搬）。
         """
         self.count_rebalance += 1
         rebal = RebalanceTraps(self.machine, self.sys_state)
@@ -721,7 +724,6 @@ class MUSSSchedule:
                     elif (e1, e0) in used_flow:
                         used_flow[(e1, e0)] += 1
 
-                # === LRU eviction：选择最久未使用的离子搬走 ===
                 candidates = self.sys_state.trap_ions[node.id]
                 valid_candidates = [ion for ion in candidates if ion not in self.protected_ions]
                 if not valid_candidates:
@@ -779,13 +781,19 @@ class MUSSSchedule:
         """
         Table 2 stable mode：
         只允许在 ion1_trap / ion2_trap 之一执行 2Q gate。
-        返回值仍保持 (moving_ion, target_trap) 形式，便于复用现有 schedule_gate 流程。
+        修复：
+          - 候选 target trap 必须有空位
+          - 若两个 target 都非法，则返回 None
+        返回值仍保持 (moving_ion, target_trap) 形式。
         """
         candidates = self._candidate_meeting_traps(ion1_trap, ion2_trap)
         best = None
         best_score = None
 
         for target in candidates:
+            if not self._trap_has_free_slot(target, incoming=1):
+                continue
+
             if target == ion1_trap:
                 moving = ion2
                 move_cost = self.machine.trap_distance(ion2_trap, target)
@@ -856,14 +864,25 @@ class MUSSSchedule:
             rebal_flag, new_fin_time = self.rebalance_traps(focus_traps=[ion1_trap, ion2_trap], fire_time=fire_time)
             if not rebal_flag:
                 meet_choice = self._choose_partition_target(ion1_trap, ion2_trap, ion1, ion2, gate_idx)
+
                 if meet_choice is not None:
                     moving_ion, dest_trap = meet_choice
                     source_trap = ion1_trap if moving_ion == ion1 else ion2_trap
                 else:
                     source_trap, dest_trap = self.shuttling_direction(ion1_trap, ion2_trap, ion1, ion2, gate_idx)
+                    if source_trap is None or dest_trap is None:
+                        self.protected_ions = set()
+                        self.schedule_gate(gate, specified_time=self.do_rebalance_traps(fire_time), gate_idx=gate_idx)
+                        return
                     moving_ion = ion1 if source_trap == ion1_trap else ion2
 
-                clk = self.fire_shuttle(source_trap, dest_trap, moving_ion, fire_time)
+                route = self._find_route_or_none(source_trap, dest_trap)
+                if route is None:
+                    self.protected_ions = set()
+                    self.schedule_gate(gate, specified_time=self.do_rebalance_traps(fire_time), gate_idx=gate_idx)
+                    return
+
+                clk = self.fire_shuttle(source_trap, dest_trap, moving_ion, fire_time, route=route)
 
                 dest_ions = self.sys_state.trap_ions[dest_trap]
                 if ion1 not in dest_ions or ion2 not in dest_ions:
@@ -900,14 +919,8 @@ class MUSSSchedule:
             return
 
         ion = qubits[0]
-
-        # [NEW FIX]
-        # 1Q gate 延后插入时，必须按完整 DAG 的前驱约束求 ready time，
-        # 不能复用 2Q-only DAG。
         ready = self.gate_ready_time_full(gate)
-
         ion_time, ion_trap = self.ion_ready_info(ion)
-
         fire_time = max(ready, ion_time)
 
         duration = self.machine.single_qubit_gate_time(gate_type)

@@ -425,41 +425,81 @@ class QubitOrdering:
             output_layout[i] = this_layout
         return output_layout
 
-
 class QubitMapTrivial:
+    """
+    Paper-faithful trivial mapper.
+
+    Rule from the MUSS-TI paper:
+      - prioritize zones ordered by their levels from highest to lowest
+      - place qubits sequentially in that order
+
+    Interpretation used here:
+      - if zone_level exists, sort traps by zone_level ascending
+        (smaller level value means higher priority)
+      - otherwise, if zone_type exists, use:
+            optical > operation > storage
+      - otherwise, fall back to trap id order
+      - then place logical qubits sequentially into traps
+    """
+
     def __init__(self, parse_obj, machine_obj, excess_capacity=0):
         self.parse_obj = parse_obj
         self.machine_obj = machine_obj
         self.excess_capacity = excess_capacity
 
+    def _effective_capacity(self, trap_id):
+        return self.machine_obj.traps[trap_id].capacity - self.excess_capacity
+
+    def _trap_priority_key(self, trap_obj):
+        zone_level = getattr(trap_obj, "zone_level", None)
+        if zone_level is not None:
+            return (zone_level, trap_obj.id)
+
+        zone_type = getattr(trap_obj, "zone_type", None)
+        if zone_type is not None:
+            order = {"optical": 0, "operation": 1, "storage": 2}
+            return (order.get(zone_type, 9), trap_obj.id)
+
+        return (0, trap_obj.id)
+
+    def _logical_qubits(self):
+        if hasattr(self.parse_obj, "nqubits"):
+            return list(range(self.parse_obj.nqubits))
+
+        qubit_set = set()
+        for gate_id, data in self.parse_obj.all_gate_map.items():
+            if isinstance(data, dict):
+                qlist = data.get("qubits", [])
+            else:
+                qlist = list(data)
+            for q in qlist:
+                qubit_set.add(q)
+        return sorted(qubit_set)
+
     def compute_mapping(self):
-        # 获取所有量子比特 ID
-        # 注意：这里最好用 parse_obj.cx_graph.nodes 确保涵盖所有相关比特
-        all_qubits = sorted(list(self.parse_obj.cx_graph.nodes))
-        num_qubits = len(all_qubits)
+        trap_order = sorted(self.machine_obj.traps, key=self._trap_priority_key)
+        logical_qubits = self._logical_qubits()
 
-        output_partition = {}
-        traps = self.machine_obj.traps
-        num_traps = len(traps)
+        mapping = {}
+        q_idx = 0
 
-        # 计算每个 Trap 的有效容量
-        # 为了负载均衡，通常平均分配
-        base_cap = self.machine_obj.traps[0].capacity - self.excess_capacity
+        for trap in trap_order:
+            cap = self._effective_capacity(trap.id)
+            for _ in range(cap):
+                if q_idx >= len(logical_qubits):
+                    break
+                mapping[logical_qubits[q_idx]] = trap.id
+                q_idx += 1
+            if q_idx >= len(logical_qubits):
+                break
 
-        # Trivial Mapping: 简单的取模分配 或 顺序填满
-        # MUSS-TI 通常倾向于顺序填满 (0,0,0, 1,1,1...) 以保持局部性
+        if q_idx != len(logical_qubits):
+            raise RuntimeError(
+                f"QubitMapTrivial failed: only mapped {q_idx}/{len(logical_qubits)} qubits."
+            )
 
-        current_trap = 0
-        current_load = 0
+        return mapping
 
-        for q in all_qubits:
-            output_partition[q] = current_trap
-            current_load += 1
-            if current_load >= base_cap:
-                current_trap = (current_trap + 1) % num_traps
-                current_load = 0
-
-        return output_partition
 
 
 import networkx as nx
@@ -1791,3 +1831,374 @@ class QubitMapSABRE7:
 
         # 直接返回超载的 Map
         return best_mapping
+    
+#论文sabre相比下的弱化版，之前是因为穿梭次数过低导致的弱化，后来发现是因为容量限制失效，现在添加上容量限制后，穿梭次数均明确增加，之前结果错误，该映射失去价值，只能作为消融版本。
+class QubitMapTrivialPaper:
+    """
+    Paper-faithful trivial mapper.
+
+    Rule from MUSS-TI paper:
+      - prioritize zones ordered by their levels from highest to lowest
+      - place qubits sequentially in that order
+
+    Interpretation:
+      - if zone_level exists: smaller zone_level = higher priority
+      - else if zone_type exists: optical > operation > storage
+      - else: trap id order
+    """
+
+    def __init__(self, parse_obj, machine_obj, excess_capacity=0):
+        self.parse_obj = parse_obj
+        self.machine_obj = machine_obj
+        self.excess_capacity = excess_capacity
+
+    def _effective_capacity(self, trap_id):
+        return self.machine_obj.traps[trap_id].capacity - self.excess_capacity
+
+    def _trap_priority_key(self, trap_obj):
+        zone_level = getattr(trap_obj, "zone_level", None)
+        if zone_level is not None:
+            return (zone_level, trap_obj.id)
+
+        zone_type = getattr(trap_obj, "zone_type", None)
+        if zone_type is not None:
+            order = {"optical": 0, "operation": 1, "storage": 2}
+            return (order.get(zone_type, 9), trap_obj.id)
+
+        return (0, trap_obj.id)
+
+    def _logical_qubits(self):
+        if hasattr(self.parse_obj, "nqubits"):
+            return list(range(self.parse_obj.nqubits))
+
+        qubit_set = set()
+        for gate_id, data in self.parse_obj.all_gate_map.items():
+            if isinstance(data, dict):
+                qlist = data.get("qubits", [])
+            else:
+                qlist = list(data)
+            for q in qlist:
+                qubit_set.add(q)
+
+        return sorted(qubit_set)
+
+    def compute_mapping(self):
+        trap_order = sorted(self.machine_obj.traps, key=self._trap_priority_key)
+        logical_qubits = self._logical_qubits()
+
+        mapping = {}
+        q_idx = 0
+
+        for trap in trap_order:
+            cap = self._effective_capacity(trap.id)
+            for _ in range(cap):
+                if q_idx >= len(logical_qubits):
+                    break
+                mapping[logical_qubits[q_idx]] = trap.id
+                q_idx += 1
+            if q_idx >= len(logical_qubits):
+                break
+
+        if q_idx != len(logical_qubits):
+            raise RuntimeError(
+                f"QubitMapTrivialPaper failed: only mapped {q_idx}/{len(logical_qubits)} qubits."
+            )
+
+        return mapping
+
+
+class QubitMapSABREPaperFinal:
+    """
+    Final paper-oriented SABRE mapper for MUSS-TI.
+
+    Design:
+      1) 2Q-only DAG
+      2) trivial seed π
+      3) forward pass on G -> π'
+      4) backward pass on reversed G -> π''
+      5) return π''
+
+    Kept:
+      - front layer
+      - executable local gates first
+      - deterministic bidirectional relocation
+      - LRU replacement only for full target traps
+
+    Removed:
+      - extended set
+      - weighted heuristic
+      - extra lookahead hyperparameters
+    """
+
+    def __init__(self, parse_obj, machine_obj, excess_capacity=0):
+        self.parse_obj = parse_obj
+        self.machine_obj = machine_obj
+        self.excess_capacity = excess_capacity
+
+        if not hasattr(self.machine_obj, "dist_cache") or not self.machine_obj.dist_cache:
+            self.machine_obj.precompute_distances()
+
+    # ==========================================================
+    # Basic helpers
+    # ==========================================================
+    def _effective_capacity(self, trap_id):
+        return self.machine_obj.traps[trap_id].capacity - self.excess_capacity
+
+    def _all_trap_ids(self):
+        return list(range(len(self.machine_obj.traps)))
+
+    def _gate_qubits(self, gate_id):
+        return tuple(self.parse_obj.cx_gate_map[gate_id])
+
+    def _load_layout(self, mapping):
+        loads = {t: 0 for t in self._all_trap_ids()}
+        trap_to_qubits = {t: [] for t in self._all_trap_ids()}
+        for q, t in mapping.items():
+            loads[t] += 1
+            trap_to_qubits[t].append(q)
+        return loads, trap_to_qubits
+
+    def _build_two_qubit_dag(self):
+        dag = getattr(self.parse_obj, "twoq_gate_graph", None)
+        if dag is None or dag.number_of_nodes() == 0:
+            dag = self.parse_obj.gate_graph.subgraph(
+                list(self.parse_obj.cx_gate_map.keys())
+            ).copy()
+
+        if not nx.is_directed_acyclic_graph(dag):
+            raise ValueError("QubitMapSABREPaperFinal requires a 2Q-only DAG.")
+        return dag
+
+    def _build_reversed_two_qubit_dag(self, dag_2q):
+        rev = dag_2q.reverse(copy=True)
+        if not nx.is_directed_acyclic_graph(rev):
+            raise ValueError("Reversed 2Q DAG is not a DAG.")
+        return rev
+
+    def _trivial_seed_mapping(self):
+        trivial_mapper = QubitMapTrivialPaper(
+            self.parse_obj, self.machine_obj, self.excess_capacity
+        )
+        return trivial_mapper.compute_mapping()
+
+    # ==========================================================
+    # Front layer
+    # ==========================================================
+    def _front_layer(self, dag, indegree_map, done_set):
+        return [g for g in dag.nodes if g not in done_set and indegree_map[g] == 0]
+
+    # ==========================================================
+    # LRU victim selection
+    # ==========================================================
+    def _select_lru_victim(self, target_trap, trap_to_qubits, last_used, forbidden=None):
+        forbidden = forbidden or set()
+        candidates = [q for q in trap_to_qubits[target_trap] if q not in forbidden]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda q: last_used.get(q, -1))
+
+    # ==========================================================
+    # Mapping updates
+    # ==========================================================
+    def _apply_direct_move(self, layout, loads, trap_to_qubits, moving_qubit, target_trap):
+        new_layout = dict(layout)
+        new_loads = dict(loads)
+        new_trap_to_qubits = {t: list(qs) for t, qs in trap_to_qubits.items()}
+
+        src_trap = new_layout[moving_qubit]
+        if src_trap == target_trap:
+            return new_layout, new_loads, new_trap_to_qubits
+
+        if new_loads[target_trap] >= self._effective_capacity(target_trap):
+            return None, None, None
+
+        new_trap_to_qubits[src_trap].remove(moving_qubit)
+        new_trap_to_qubits[target_trap].append(moving_qubit)
+        new_loads[src_trap] -= 1
+        new_loads[target_trap] += 1
+        new_layout[moving_qubit] = target_trap
+
+        return new_layout, new_loads, new_trap_to_qubits
+
+    def _apply_lru_replacement(
+        self,
+        layout,
+        loads,
+        trap_to_qubits,
+        last_used,
+        moving_qubit,
+        target_trap,
+        partner_qubit=None,
+    ):
+        new_layout = dict(layout)
+        new_loads = dict(loads)
+        new_trap_to_qubits = {t: list(qs) for t, qs in trap_to_qubits.items()}
+
+        src_trap = new_layout[moving_qubit]
+        if src_trap == target_trap:
+            return new_layout, new_loads, new_trap_to_qubits
+
+        if new_loads[target_trap] < self._effective_capacity(target_trap):
+            return self._apply_direct_move(layout, loads, trap_to_qubits, moving_qubit, target_trap)
+
+        victim = self._select_lru_victim(
+            target_trap,
+            new_trap_to_qubits,
+            last_used,
+            forbidden={partner_qubit} if partner_qubit is not None else set(),
+        )
+        if victim is None:
+            return None, None, None
+
+        # victim: target_trap -> src_trap
+        new_trap_to_qubits[target_trap].remove(victim)
+        new_trap_to_qubits[src_trap].append(victim)
+        new_layout[victim] = src_trap
+
+        # moving_qubit: src_trap -> target_trap
+        new_trap_to_qubits[src_trap].remove(moving_qubit)
+        new_trap_to_qubits[target_trap].append(moving_qubit)
+        new_layout[moving_qubit] = target_trap
+
+        return new_layout, new_loads, new_trap_to_qubits
+
+    # ==========================================================
+    # Deterministic bidirectional relocation
+    # ==========================================================
+    def _choose_direction_and_apply(
+        self,
+        q1,
+        q2,
+        layout,
+        loads,
+        trap_to_qubits,
+        last_used,
+    ):
+        """
+        Try only two directions:
+          1) q1 -> trap(q2)
+          2) q2 -> trap(q1)
+
+        Selection rule:
+          A. Prefer direct move if available
+          B. Otherwise use LRU replacement
+          C. Tie-break:
+               - smaller target trap id
+               - then smaller moving qubit id
+        """
+        t1 = layout[q1]
+        t2 = layout[q2]
+
+        if t1 == t2:
+            return layout, loads, trap_to_qubits, None
+
+        candidates = []
+
+        # direct moves
+        cand_layout, cand_loads, cand_trap_to_qubits = self._apply_direct_move(
+            layout, loads, trap_to_qubits, q1, t2
+        )
+        if cand_layout is not None:
+            candidates.append(("direct", t2, q1, cand_layout, cand_loads, cand_trap_to_qubits))
+
+        cand_layout, cand_loads, cand_trap_to_qubits = self._apply_direct_move(
+            layout, loads, trap_to_qubits, q2, t1
+        )
+        if cand_layout is not None:
+            candidates.append(("direct", t1, q2, cand_layout, cand_loads, cand_trap_to_qubits))
+
+        if candidates:
+            candidates.sort(key=lambda x: (0, x[1], x[2]))
+            _, _, moved_q, best_layout, best_loads, best_trap_to_qubits = candidates[0]
+            return best_layout, best_loads, best_trap_to_qubits, moved_q
+
+        # LRU replacements
+        candidates = []
+
+        cand_layout, cand_loads, cand_trap_to_qubits = self._apply_lru_replacement(
+            layout, loads, trap_to_qubits, last_used, q1, t2, partner_qubit=q2
+        )
+        if cand_layout is not None:
+            candidates.append(("lru", t2, q1, cand_layout, cand_loads, cand_trap_to_qubits))
+
+        cand_layout, cand_loads, cand_trap_to_qubits = self._apply_lru_replacement(
+            layout, loads, trap_to_qubits, last_used, q2, t1, partner_qubit=q1
+        )
+        if cand_layout is not None:
+            candidates.append(("lru", t1, q2, cand_layout, cand_loads, cand_trap_to_qubits))
+
+        if candidates:
+            candidates.sort(key=lambda x: (1, x[1], x[2]))
+            _, _, moved_q, best_layout, best_loads, best_trap_to_qubits = candidates[0]
+            return best_layout, best_loads, best_trap_to_qubits, moved_q
+
+        raise RuntimeError(
+            f"QubitMapSABREPaperFinal failed on gate ({q1}, {q2}): "
+            f"no direct move and no valid LRU replacement."
+        )
+
+    # ==========================================================
+    # One pass simulation
+    # ==========================================================
+    def _simulate_pass(self, dag, initial_mapping):
+        layout = dict(initial_mapping)
+        loads, trap_to_qubits = self._load_layout(layout)
+
+        indegree_map = {g: dag.in_degree(g) for g in dag.nodes}
+        done_set = set()
+
+        # internal LRU time for this pass
+        last_used = {q: -1 for q in layout.keys()}
+        timestamp = 0
+
+        while len(done_set) < dag.number_of_nodes():
+            front = self._front_layer(dag, indegree_map, done_set)
+
+            executable = []
+            for g in front:
+                q1, q2 = self._gate_qubits(g)
+                if layout[q1] == layout[q2]:
+                    executable.append(g)
+
+            if executable:
+                # execute all currently local front-layer gates
+                for g in executable:
+                    q1, q2 = self._gate_qubits(g)
+                    timestamp += 1
+                    last_used[q1] = timestamp
+                    last_used[q2] = timestamp
+
+                    done_set.add(g)
+                    for succ in dag.successors(g):
+                        indegree_map[succ] -= 1
+                continue
+
+            # no local executable gate: choose one front gate deterministically
+            chosen_gate = min(front)
+            q1, q2 = self._gate_qubits(chosen_gate)
+
+            layout, loads, trap_to_qubits, moved_q = self._choose_direction_and_apply(
+                q1, q2, layout, loads, trap_to_qubits, last_used
+            )
+
+            timestamp += 1
+            if moved_q is not None:
+                last_used[moved_q] = timestamp
+
+            # after relocation, the chosen gate should now be local, so loop continues
+            # and it will be consumed in the next executable phase
+
+        return layout
+
+    # ==========================================================
+    # Public API
+    # ==========================================================
+    def compute_mapping(self):
+        dag_2q = self._build_two_qubit_dag()
+        dag_2q_rev = self._build_reversed_two_qubit_dag(dag_2q)
+
+        seed_mapping = self._trivial_seed_mapping()
+        mapping_after_forward = self._simulate_pass(dag_2q, seed_mapping)
+        mapping_after_backward = self._simulate_pass(dag_2q_rev, mapping_after_forward)
+
+        return mapping_after_backward

@@ -70,29 +70,48 @@ def _tag_qccd_roles_2x3(m):
 
 def test_trap_2x3(capacity, mparams):
     """
-    2x3 网格：6 个 Trap + 3 个 Junction
-    直觉理解：两列三行（或两行三列）trap，通过中间 3 个 junction 串起来
+    2x3 grid with row-major trap numbering.
+
+    Layout (row-major):
+        top row:    T0  T1  T2
+        bottom row: T3  T4  T5
+
+    Junction backbone:
+        J0 -- J1 -- J2
+
+    Local branches:
+        T0, T3 connect to J0
+        T1, T4 connect to J1
+        T2, T5 connect to J2
+
+    Orientation convention:
+        top-row trap branch uses "R"
+        bottom-row trap branch uses "L"
     """
     m = Machine(mparams)
+
+    # Row-major trap numbering:
+    # top row    -> 0, 1, 2
+    # bottom row -> 3, 4, 5
     t = [m.add_trap(i, capacity) for i in range(6)]
     j = [m.add_junction(i) for i in range(3)]
 
-    # Trap -> Junction 的“支线段”
-    # orientation 对 Trap 有意义：表示该 segment 在 Trap 的左(L)/右(R)侧，用于 split 时选链端
+    # Top row branches
     m.add_segment(0, t[0], j[0], "R")
     m.add_segment(1, t[1], j[1], "R")
     m.add_segment(2, t[2], j[2], "R")
 
-    m.add_segment(3, t[3], j[2], "L")
+    # Bottom row branches
+    m.add_segment(3, t[3], j[0], "L")
     m.add_segment(4, t[4], j[1], "L")
-    m.add_segment(5, t[5], j[0], "L")
+    m.add_segment(5, t[5], j[2], "L")
 
-    # Junction 之间的“主干段”
-    # 【修复】原文件把 6 用了两次，这里改为 6 和 7
+    # Junction backbone
     m.add_segment(6, j[0], j[1])
     m.add_segment(7, j[1], j[2])
 
     return _tag_qccd_roles_2x3(m) if _is_large_arch(mparams) else m
+
 
 
 def test_trap_2x2(capacity, mparams):

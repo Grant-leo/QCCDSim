@@ -11,7 +11,7 @@ from qiskit.converters import circuit_to_dag
 from qiskit.visualization import dag_drawer
 
 # 导入三个版本的 MUSS 调度器
-from muss_schedule2 import MUSSSchedule as MUSSScheduleV2   # 论文版本调度
+from muss_schedule2 import MUSSSchedule as MUSSScheduleV2
 try:
     from muss_schedule3 import MUSSSchedule as MUSSScheduleV3
 except Exception:
@@ -20,7 +20,7 @@ try:
     from muss_schedule4 import MUSSSchedule as MUSSScheduleV4
 except Exception:
     MUSSScheduleV4 = None
-
+from muss2_debug import MUSSSchedule as MUSSScheduledebug
 np.random.seed(12345)
 
 
@@ -61,10 +61,10 @@ if len(sys.argv) < 11:
     print("用法:")
     print("python run.py <qasm> <machine_type> <ions_per_region> <mapper> <reorder> "
           "<serial_trap_ops> <serial_comm> <serial_all> <gate_type> <swap_type> "
-          "[sched_family] [sched_version]")
+          "[sched_family] [sched_version] [analyzer_mode] [architecture_scale]")
     print("")
     print("示例:")
-    print("python run.py ghz32.qasm G2x2 12 SABRE Fidelity 1 1 0 FM PaperSwapDirect MUSS V2")
+    print("python run.py ghz32.qasm G2x2 12 SABRE Fidelity 1 1 0 FM PaperSwapDirect MUSS V2 PAPER SMALL")
     sys.exit(1)
 
 openqasm_file_name = sys.argv[1]
@@ -73,16 +73,15 @@ num_ions_per_region = int(sys.argv[3])
 mapper_choice = sys.argv[4]
 reorder_choice = sys.argv[5]
 
-serial_trap_ops = int(sys.argv[6])   # 阱内操作是否串行
-serial_comm = int(sys.argv[7])       # 通信是否串行
-serial_all = int(sys.argv[8])        # 所有操作是否全串行
+serial_trap_ops = int(sys.argv[6])
+serial_comm = int(sys.argv[7])
+serial_all = int(sys.argv[8])
 
-gate_type = sys.argv[9]              # PM / FM / Duan / Trout
-swap_type = sys.argv[10]             # PaperSwapDirect / GateSwap / IonSwap
+gate_type = sys.argv[9]
+swap_type = sys.argv[10]
 
-# 新增：调度器家族和版本（可缺省）
 sched_family = get_arg(11, "MUSS").upper()
-sched_version = get_arg(12, "V2").upper()   # 不锁死 V2，保留你原来的默认习惯
+sched_version = get_arg(12, "V2").upper()
 analyzer_mode = get_arg(13, "PAPER").upper()
 architecture_scale = get_arg(14, None)
 
@@ -99,17 +98,21 @@ mpar.ion_swap_time = 40
 mpar.junction2_cross_time = 5
 mpar.junction3_cross_time = 5
 mpar.junction4_cross_time = 5
-mpar.move_speed_um_per_us = 2.0       # Table 1: Move speed 2 μm/us
+mpar.move_speed_um_per_us = 2.0
 
 # ---- 这些是实现/拟合相关参数 ----
-mpar.segment_length_um = 28.0         # 默认段长；后续可按机器类型再调
-mpar.inter_ion_spacing_um = 1.0       # gate_time 距离项使用
-mpar.alpha_bg = 0.0                 # 论文对准时通常先关掉背景 Bi
+mpar.segment_length_um = 28.0
+mpar.inter_ion_spacing_um = 1.0
+
+# 论文复现默认值：
+# 保留 B_i 接口，因此不给 0；若你后续要完全关闭 B_i，可显式改回 0.0
+mpar.alpha_bg = 0.0
+
 mpar.architecture_scale = "small"
-mpar.enable_partition = False         # small: no partition, all traps can execute 2Q
+mpar.enable_partition = False
 
 # ---- Analyzer 会读到的物理参数（兼容保留）----
-mpar.T1 = 600e6                       # us
+mpar.T1 = 600e6
 mpar.k_heating = 0.001
 mpar.epsilon = 1.0 / 25600.0
 
@@ -187,7 +190,7 @@ ip.visualize_graph("visualize_graph_2.gexf")
 
 qc = QuantumCircuit.from_qasm_file(openqasm_file_name)
 dag = circuit_to_dag(qc)
-# dag_drawer(dag, filename=f"{openqasm_file_name[:-5]}.svg")   # 可选输出
+# dag_drawer(dag, filename=f"{openqasm_file_name[:-5]}.svg")
 
 print("parse object map:")
 print(ip.cx_gate_map)
@@ -211,22 +214,21 @@ elif mapper_choice == "Greedy":
 elif mapper_choice == "Trivial":
     qm = QubitMapTrivial(ip, m)
 elif mapper_choice == "SABRE":
-    # 根据调度器版本选择对应 SABRE 变体
     if sched_family in ["MUSS", "MUSS-TI", "MUSS_TI_MODE"]:
         if sched_version in ["V2", "2", "MUSS_SCHEDULE2", "PAPER"]:
-            print("→ Using SABRE2 mapper (matches muss_schedule2 paper version)")
+            print("→ Using QubitMapSABRE2 mapper (matches muss_schedule2 paper version)")
             qm = QubitMapSABRE2(ip, m)
         elif sched_version in ["V3", "3", "MUSS_SCHEDULE3", "INNOV"]:
-            print("→ Using SABRE6 mapper (matches muss_schedule3 improved version)")
-            qm = QubitMapSABRE3(ip, m)
+            print("→ Using QubitMapSABRE2 mapper (matches muss_schedule3 improved version)")
+            qm = QubitMapSABRE2(ip, m)
         elif sched_version in ["V4", "4", "MUSS_SCHEDULE4", "INNOV2"]:
             print("→ Using SABRE6 mapper (matches muss_schedule4 improved version)")
             qm = QubitMapSABRE6(ip, m)
         else:
-            print(f"Warning: Unknown scheduler version '{sched_version}', fallback to SABRE3")
+            print(f"Warning: Unknown scheduler version '{sched_version}', fallback to SABRE2")
             qm = QubitMapSABRE2(ip, m)
     else:
-        print("→ Using default SABRE3 mapper (non-MUSS scheduler)")
+        print("→ Using default SABRE2 mapper (non-MUSS scheduler)")
         qm = QubitMapSABRE2(ip, m)
 else:
     print(f"Error: Unsupported mapper choice '{mapper_choice}'")
@@ -261,7 +263,7 @@ print(f"Using {sched_family} Scheduler ({sched_version}) with {mapper_choice} Ma
 
 if sched_family in ["MUSS", "MUSS-TI", "MUSS_TI_MODE"]:
     if sched_version in ["V2", "2", "MUSS_SCHEDULE2", "PAPER"]:
-        print("→ muss_schedule2.py old_vision")
+        print("→ muss_schedule2.py paper-faithful fixed version")
         scheduler = MUSSScheduleV2(
             ip, m, init_qubit_layout,
             serial_trap_ops, serial_comm, serial_all
@@ -312,7 +314,6 @@ else:
     print(f"Warning: unknown analyzer mode '{analyzer_mode}', fallback to PAPER")
     knobs = AnalyzerKnobs.paper_mode(shuttle_fidelity_mode=shuttle_mode, debug_summary=True)
 
-
 analyzer = Analyzer(scheduler, m, init_qubit_layout, knobs)
 result = analyzer.analyze_and_return()
 
@@ -333,6 +334,7 @@ if hasattr(scheduler, "split_swap_counter"):
     print("SplitSWAP:", scheduler.split_swap_counter)
 
 if hasattr(scheduler, "shuttle_counter"):
-    print("TotalShuttle:", scheduler.shuttle_counter)
+    print("SchedulerFiredShuttle:", scheduler.shuttle_counter)
 
+print("ReportedTotalShuttle:", result.get("total_shuttle"))
 print("----------------")
