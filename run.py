@@ -12,15 +12,26 @@ from qiskit.visualization import dag_drawer
 
 # 导入三个版本的 MUSS 调度器
 from muss_schedule2 import MUSSSchedule as MUSSScheduleV2
+
 try:
     from muss_schedule3 import MUSSSchedule as MUSSScheduleV3
 except Exception:
     MUSSScheduleV3 = None
+
 try:
     from muss_schedule4 import MUSSSchedule as MUSSScheduleV4
 except Exception:
     MUSSScheduleV4 = None
-from muss2_debug import MUSSSchedule as MUSSScheduledebug
+
+try:
+    from muss_schedule5 import MUSSSchedule as MUSSScheduleV5
+except Exception:
+    MUSSScheduleV5 = None
+
+try:
+    from muss_schedule6 import MUSSSchedule as MUSSScheduleV6
+except Exception:
+    MUSSScheduleV6 = None
 
 np.random.seed(12345)
 
@@ -183,7 +194,7 @@ mpar.inter_ion_spacing_um = 1.0
 
 # 论文复现默认值：
 # 保留 B_i 接口，因此不给 0；若你后续要完全关闭 B_i，可显式改回 0.0
-mpar.alpha_bg = 0.0001
+mpar.alpha_bg = 0.0
 
 mpar.architecture_scale = "small"
 mpar.enable_partition = False
@@ -302,6 +313,12 @@ elif mapper_choice == "SABRE":
         elif sched_version in ["V4", "4", "MUSS_SCHEDULE4", "INNOV2"]:
             print("Using SABRE6 mapper (matches muss_schedule4 improved version)")
             qm = QubitMapSABRE6(ip, m)
+        elif sched_version in ["V5", "5", "MUSS_SCHEDULE5", "INNOV3"]:
+            print("Using SABRE2 mapper (matches muss_schedule5 improved version)")
+            qm = QubitMapSABRE2(ip, m)
+        elif sched_version in ["V6", "6", "MUSS_SCHEDULE6", "INNOV4"]:
+            print("Using SABRE2 mapper (matches muss_schedule6 improved version)")
+            qm = QubitMapSABRE2(ip, m)
         else:
             print(f"Warning: Unknown scheduler version '{sched_version}', fallback to SABRE2")
             qm = QubitMapSABRE2(ip, m)
@@ -388,8 +405,26 @@ if sched_family in ["MUSS", "MUSS-TI", "MUSS_TI_MODE"]:
             ip.gate_graph, ip.all_gate_map, m, init_qubit_layout,
             serial_trap_ops, serial_comm, serial_all
         )
+    elif sched_version in ["V5", "45", "MUSS_SCHEDULE5", "INNOV2"]:
+        if MUSSScheduleV5 is None:
+            print("Error: muss_schedule5 is not available")
+            sys.exit(1)
+        print("Using muss_schedule5.py new_vision")
+        scheduler = MUSSScheduleV5(
+            ip.gate_graph, ip.all_gate_map, m, init_qubit_layout,
+            serial_trap_ops, serial_comm, serial_all
+        )
+    elif sched_version in ["V6", "6", "MUSS_SCHEDULE6", "INNOV4"]:
+        if MUSSScheduleV6 is None:
+            print("Error: muss_schedule6 is not available")
+            sys.exit(1)
+        print("Using muss_schedule6.py new_vision")
+        scheduler = MUSSScheduleV6(
+            ip.gate_graph, ip.all_gate_map, m, init_qubit_layout,
+            serial_trap_ops, serial_comm, serial_all
+        )
     else:
-        print(f"Error: Unsupported scheduler version '{sched_version}', supported: V2 / V3 / V4")
+        print(f"Error: Unsupported scheduler version '{sched_version}', supported: V2 / V3 / V4 / V5 / V6")
         sys.exit(1)
 else:
     print("Fallback to EJF scheduler")
